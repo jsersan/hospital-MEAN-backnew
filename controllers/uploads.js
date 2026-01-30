@@ -1,88 +1,114 @@
 const { response } = require('express');
-const { v4: uuidv4 } = require('uuid');
-const { actualizarImagen } = require('../helper/actualizar-imagen');
-const path = require('path');
-const fs = require('fs');
+const { cloudinary } = require('../config/cloudinary');
+const Usuario = require('../models/usuario');
+const Medico = require('../models/medico');
+const Hospital = require('../models/hospital');
 
-const fileUpload = (req, res = response) => {
+const fileUpload = async (req, res = response) => {
+    try {
+        const { tipo, id } = req.params;
 
-    const tipo = req.params.tipo;
-    const id   = req.params.id;
-
-    const tiposValidos = ['hospitales','medicos','usuarios'];
-    if (!tiposValidos.includes(tipo)) {
-        return res.status(400).json({
-            ok: false,
-            msg:'No es médico, usuario u hospital'
-        });
-    }
-
-    if (!req.files || Object.keys(req.files).length === 0) {
-        return res.status(400).json({
-            ok:false,
-            msg:'No hay ningún archivo'
-        });
-    }  
-
-    const file = req.files.imagen;
-    const nombreCortado = file.name.split('.');
-    const extensionArchivo = nombreCortado[nombreCortado.length - 1];
-
-    const extensionesValidas = ['png','jpg','jpeg','gif'];
-    if (!extensionesValidas.includes(extensionArchivo)) {
-        return res.status(400).json({
-            ok:false,
-            msg:'No es una extensión permitida'
-        });
-    }
-
-    const nombreArchivo = `${uuidv4()}.${extensionArchivo}`;
-    
-    // ✅ IMPORTANTE: No redefinir 'path', usar 'uploadPath'
-    const uploadPath = `./uploads/${tipo}/${nombreArchivo}`;
-
-    file.mv(uploadPath, async (err) => { 
-        if (err) {
-            console.log(err);
-            return res.status(500).json({
-                ok: false,
-                msg: 'Error al mover la imagen'
-            });
-        }
-
-        // Actualizar la base de datos
-        const actualizado = await actualizarImagen(tipo, id, nombreArchivo);
-
-        if (!actualizado) {
+        // Validar que se subió un archivo
+        if (!req.file) {
             return res.status(400).json({
                 ok: false,
-                msg: 'No se pudo actualizar la imagen en la BD'
+                msg: 'No se subió ningún archivo'
             });
         }
+
+        // Validar tipo
+        const tiposValidos = ['hospitales', 'medicos', 'usuarios'];
+        if (!tiposValidos.includes(tipo)) {
+            return res.status(400).json({
+                ok: false,
+                msg: 'No es un médico, usuario u hospital (tipo no válido)'
+            });
+        }
+
+        // Obtener el modelo según el tipo
+        let modelo;
+        switch (tipo) {
+            case 'usuarios':
+                modelo = Usuario;
+                break;
+            case 'medicos':
+                modelo = Medico;
+                break;
+            case 'hospitales':
+                modelo = Hospital;
+                break;
+        }
+
+        // Buscar el documento en la base de datos
+        const documento = await modelo.findById(id);
+        if (!documento) {
+            // Si subió una imagen pero no existe el documento, eliminar de Cloudinary
+            const publicId = req.file.filename; // Cloudinary guarda el public_id aquí
+            await cloudinary.uploader.destroy(publicId);
+            
+            return res.status(404).json({
+                ok: false,
+                msg: `No existe un ${tipo.slice(0, -1)} con el id ${id}`
+            });
+        }
+
+        // Si el documento ya tenía una imagen anterior, eliminarla de Cloudinary
+        if (documento.img) {
+            // Extraer el public_id de la URL de Cloudinary
+            const urlParts = documento.img.split('/');
+            const filename = urlParts[urlParts.length - 1];
+            const publicId = `hospital-mean/${filename.split('.')[0]}`;
+            
+            try {
+                await cloudinary.uploader.destroy(publicId);
+            } catch (error) {
+                console.log('Error al eliminar imagen anterior:', error);
+                // No detener el proceso si falla la eliminación
+            }
+        }
+
+        // Actualizar el documento con la nueva URL de Cloudinary
+        documento.img = req.file.path; // Cloudinary guarda la URL completa en req.file.path
+        await documento.save();
 
         res.json({
             ok: true,
-            msg: 'Archivo subido',
-            nombreArchivo
+            msg: 'Archivo subido correctamente',
+            img: documento.img
         });
-    });
-}    
 
-const retornaImagen = (req, res = response) => {
-    const tipo = req.params.tipo;
-    const foto = req.params.foto;
-
-    const pathImg = path.join(__dirname, `../uploads/${tipo}/${foto}`);
-
-    if (fs.existsSync(pathImg)) {
-        res.sendFile(pathImg);
-    } else {
-        const pathNoImg = path.join(__dirname, `../uploads/no-image.jpeg`);
-        res.sendFile(pathNoImg);
+    } catch (error) {
+        console.log(error);
+        res.status(500).json({
+            ok: false,
+            msg: 'Error al subir el archivo. Hable con el administrador'
+        });
     }
-}
+};
+
+const retornaImagen = async (req, res = response) => {
+    const { tipo, foto } = req.params;
+
+    // Con Cloudinary, esta función ya no es necesaria porque las imágenes
+    // se sirven directamente desde Cloudinary. Pero la dejamos por compatibilidad.
+    
+    // Simplemente redirigir a una imagen por defecto o devolver 404
+    const path = require('path');
+    const fs = require('fs');
+    
+    const pathImagen = path.join(__dirname, `../uploads/no-img.jpg`);
+    
+    if (fs.existsSync(pathImagen)) {
+        res.sendFile(pathImagen);
+    } else {
+        res.status(404).json({
+            ok: false,
+            msg: 'Imagen no encontrada'
+        });
+    }
+};
 
 module.exports = {
-    fileUpload, 
+    fileUpload,
     retornaImagen
-}
+};
